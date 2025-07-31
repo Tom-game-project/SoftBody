@@ -1,4 +1,7 @@
 /target
-
+# note
 memo.md
 test.py
+# vim
+*.swp
+*.swo

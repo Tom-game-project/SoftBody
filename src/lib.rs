@@ -1,13 +1,16 @@
 use num_traits::{AsPrimitive, FromPrimitive};
 use std::fmt::Debug;
 
-struct Point{
-    //mass:i32,
+mod circular;
+use circular::CircularWindowsExt;
+
+pub struct Point{
+    mass: f32,
     position:(f32, f32),
-    //velocity:(i32, i32),
+    velocity:(f32, f32),
 }
 
-struct SoftBody{
+pub struct SoftBody{
     shape: Vec<Point>,
     // 他のフィールド
 }
@@ -38,58 +41,9 @@ impl SoftBody {
 }
 
 #[derive(Debug, Copy, Clone)]
-struct Line<T> {
+pub struct Line<T> {
     start: (T, T),
     end: (T, T),
-}
-
-/// スライスの要素を循環的にペアリングするイテレータ。
-/// 例: `[a, b, c]` -> `(a, b), (b, c), (c, a)`
-#[derive(Debug)]
-pub struct CircularWindows<'a, T> {
-    slice: &'a [T],
-    index: usize,
-}
-
-// Iteratorトレイトを実装
-impl<'a, T> Iterator for CircularWindows<'a, T> {
-    // イテレータが返す値の型。要素のペアへの参照。
-    type Item = (&'a T, &'a T);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // スライスが空、またはすべての要素を処理し終えたら終了
-        if self.slice.is_empty() || self.index >= self.slice.len() {
-            return None;
-        }
-
-        // 現在の要素への参照を取得
-        let first = &self.slice[self.index];
-
-        // 次の要素のインデックスを計算（末尾なら先頭に戻る）
-        let second_index = (self.index + 1) % self.slice.len();
-        let second = &self.slice[second_index];
-
-        // 次の呼び出しのためにインデックスを進める
-        self.index += 1;
-
-        // ペアを返す
-        Some((first, second))
-    }
-}
-
-/// `circular_windows()` メソッドをスライスで使えるようにするための拡張トレイト
-pub trait CircularWindowsExt<T> {
-    fn circular_windows(&self) -> CircularWindows<'_, T>;
-}
-
-// すべてのスライス `[T]` に対して上記トレイトを実装
-impl<T> CircularWindowsExt<T> for [T] {
-    fn circular_windows(&self) -> CircularWindows<'_, T> {
-        CircularWindows {
-            slice: self,
-            index: 0,
-        }
-    }
 }
 
 /// 2つの線分の交点を計算します（ジェネリック版）。
@@ -101,7 +55,7 @@ impl<T> CircularWindowsExt<T> for [T] {
 /// * `T: Copy + Debug`: 値のコピーとデバッグ表示が可能であること。
 /// * `T: AsPrimitive<f64>`: 計算のために `f64` に変換可能であること。
 /// * `T: FromPrimitive`: 計算結果の `f64` から元の型 `T` に変換可能であること。
-fn inter_section<T>(l1: Line<T>, l2: Line<T>) -> Option<(T, T)>
+pub fn inter_section<T>(l1: Line<T>, l2: Line<T>) -> Option<(T, T)>
 where
     T: Copy + Debug + AsPrimitive<f64> + FromPrimitive,
 {
@@ -139,7 +93,7 @@ where
 }
 
 /// SoftBodyと線分のすべての交点を計算する
-fn find_all_intersections(softbody: &SoftBody, line: &Line<f32>) -> Vec<(f32, f32)> {
+pub fn find_all_intersections(softbody: &SoftBody, line: &Line<f32>) -> Vec<(f32, f32)> {
     let mut points = Vec::new();
 
     // SoftBodyの各辺をイテレート
@@ -189,7 +143,7 @@ fn distance_sq_point_to_segment(point: (f32, f32), segment: Line<f32>) -> (f32, 
 }
 
 /// ある点に最も近いSoftBody上の辺（線分）を見つける
-fn find_nearest_segment(softbody: &SoftBody, point: (f32, f32)) -> Option<(Line<f32>, (f32, f32))> {
+pub fn find_nearest_segment(softbody: &SoftBody, point: (f32, f32)) -> Option<(Line<f32>, (f32, f32))> {
     if softbody.shape.is_empty() {
         return None;
     }
@@ -205,6 +159,64 @@ fn find_nearest_segment(softbody: &SoftBody, point: (f32, f32)) -> Option<(Line<
         // `min_by`で最小の距離を持つ要素を見つける
         .min_by(|(d1, _, _), (d2, _, _)| d1.partial_cmp(d2).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(_, segment, closest_point)| (segment, closest_point))
+}
+
+/// 点A, B, Pを受け取り、Pが直線AB上に移動した後の
+/// 各点の新しい状態をタプル (Point, Point, Point) として返します。
+///
+/// # 引数
+/// * `a` - 点Aの参照
+/// * `b` - 点Bの参照
+/// * `p` - 点Pの参照
+pub fn move_p_to_line_ab(a: &Point, b: &Point, p: &Point, alpha_degrees: f32) -> (Point, Point, Point) {
+    // === 1. 初期値の定義 ===
+    let pos_a0 = a.position;
+    let pos_b0 = b.position;
+    let pos_p0 = p.position;
+
+    let m0 = a.mass;
+    let m1 = b.mass;
+    let m2 = p.mass;
+    let total_mass = m0 + m1 + m2;
+
+    // === 2. 垂線の足 Q0 の座標を計算 ===
+    let vec_ab = (pos_b0.0 - pos_a0.0, pos_b0.1 - pos_a0.1);
+    let vec_ap = (pos_p0.0 - pos_a0.0, pos_p0.1 - pos_a0.1);
+
+    let dot_product = vec_ap.0 * vec_ab.0 + vec_ap.1 * vec_ab.1;
+    let len_sq_ab = vec_ab.0 * vec_ab.0 + vec_ab.1 * vec_ab.1;
+
+    // AとBが同じ点にある場合を考慮
+    let pos_q0 = if len_sq_ab == 0.0 {
+        pos_a0 // Q0はAと同じ位置になる
+    } else {
+        let t = dot_product / len_sq_ab;
+        (pos_a0.0 + t * vec_ab.0, pos_a0.1 + t * vec_ab.1)
+    };
+
+    // === 3. P0からQ0へのベクトルを計算 ===
+    let vec_p0q0 = (pos_q0.0 - pos_p0.0, pos_q0.1 - pos_p0.1);
+
+    // === 4. 各点の変位（移動）ベクトルを計算 ===
+    // AとBの変位ベクトル d = -(m2 / M) * P0Q0
+    let factor_ab = -m2 / total_mass;
+    let displacement_ab = (factor_ab * vec_p0q0.0, factor_ab * vec_p0q0.1);
+
+    // Pの変位ベクトル dP = (m0 + m1 / M) * P0Q0
+    let factor_p = (m0 + m1) / total_mass;
+    let displacement_p = (factor_p * vec_p0q0.0, factor_p * vec_p0q0.1);
+
+    // === 5. 新しい位置を計算 ===
+    let pos_af = (pos_a0.0 + displacement_ab.0, pos_a0.1 + displacement_ab.1);
+    let pos_bf = (pos_b0.0 + displacement_ab.0, pos_b0.1 + displacement_ab.1);
+    let pos_pf = (pos_p0.0 + displacement_p.0, pos_p0.1 + displacement_p.1);
+
+    // === 6. 新しいPointオブジェクトを作成して返す ===
+    let new_a = Point { mass: m0, velocity:a.velocity, position: pos_af };
+    let new_b = Point { mass: m1, velocity:b.velocity, position: pos_bf };
+    let new_p = Point { mass: m2, velocity:p.velocity, position: pos_pf };
+
+    (new_a, new_b, new_p)
 }
 
 
@@ -281,23 +293,29 @@ mod tests {
         }
     }
 
+
+    fn init_point_with_zero_v(x: f32, y: f32) -> Point
+    {
+        Point { position: (x, y) , velocity: (0.0, 0.0), mass: 1.0}
+    }
+
     /// インタラクティブなテストウィンドウを起動する
     async fn interactive_test_main() {
         // テスト用のSoftBodyを2つ準備
         let mut body1 = SoftBody {
             shape: vec![
-                Point { position: (100.0, 100.0) },
-                Point { position: (300.0, 100.0) },
-                Point { position: (300.0, 250.0) },
-                Point { position: (100.0, 250.0) },
+                init_point_with_zero_v(100.0, 100.0),
+                init_point_with_zero_v(300.0, 100.0),
+                init_point_with_zero_v(300.0, 250.0),
+                init_point_with_zero_v(100.0, 250.0),
             ],
         };
 
         let mut body2 = SoftBody {
             shape: vec![
-                Point { position: (400.0, 300.0) },
-                Point { position: (600.0, 300.0) },
-                Point { position: (550.0, 450.0) },
+                init_point_with_zero_v(400.0, 300.0),
+                init_point_with_zero_v(600.0, 300.0),
+                init_point_with_zero_v(550.0, 450.0),
             ],
         };
 
@@ -335,19 +353,20 @@ mod tests {
         }
     }
 
+    /// 交点をすべて集めるテスト
     async fn interactive_test_main01() {
         // テスト用のSoftBodyを準備
         let softbody = SoftBody {
             shape: vec![
                 // 頂点を順番に結んでいく
-                Point { position: (400.0, 100.0) }, // 外側の頂点 1 (上)
-                Point { position: (350.0, 250.0) }, // 内側の頂点 1 (凹み)
-                Point { position: (500.0, 300.0) }, // 外側の頂点 2 (右)
-                Point { position: (400.0, 350.0) }, // 内側の頂点 2 (凹み)
-                Point { position: (300.0, 500.0) }, // 外側の頂点 3 (下)
-                Point { position: (250.0, 350.0) }, // 内側の頂点 3 (凹み)
-                Point { position: (100.0, 300.0) }, // 外側の頂点 4 (左)
-                Point { position: (250.0, 250.0) }, // 内側の頂点 4 (凹み)
+                 init_point_with_zero_v(400.0, 100.0) , // 外側の頂点 1 (上)
+                 init_point_with_zero_v(350.0, 250.0)  , // 内側の頂点 1 (凹み)
+                 init_point_with_zero_v(500.0, 300.0) , // 外側の頂点 2 (右)
+                 init_point_with_zero_v(400.0, 350.0) , // 内側の頂点 2 (凹み)
+                 init_point_with_zero_v(300.0, 500.0) , // 外側の頂点 3 (下)
+                 init_point_with_zero_v(250.0, 350.0) , // 内側の頂点 3 (凹み)
+                 init_point_with_zero_v(100.0, 300.0) , // 外側の頂点 4 (左)
+                 init_point_with_zero_v(250.0, 250.0) , // 内側の頂点 4 (凹み)
             ],
         };
 
@@ -388,17 +407,18 @@ mod tests {
         }
     }
 
+    /// 最近傍の線分を発見する
     async fn interactive_test_main02() {
         let softbody = SoftBody {
             shape: vec![
-                Point { position: (400.0, 100.0) },
-                Point { position: (350.0, 250.0) },
-                Point { position: (500.0, 300.0) },
-                Point { position: (400.0, 350.0) },
-                Point { position: (300.0, 500.0) },
-                Point { position: (250.0, 350.0) },
-                Point { position: (100.0, 300.0) },
-                Point { position: (250.0, 250.0) },
+                 init_point_with_zero_v(400.0, 100.0) ,
+                 init_point_with_zero_v(350.0, 250.0) ,
+                 init_point_with_zero_v(500.0, 300.0) ,
+                 init_point_with_zero_v(400.0, 350.0) ,
+                 init_point_with_zero_v(300.0, 500.0) ,
+                 init_point_with_zero_v(250.0, 350.0) ,
+                 init_point_with_zero_v(100.0, 300.0) ,
+                 init_point_with_zero_v(250.0, 250.0) ,
             ],
         };
 
@@ -437,6 +457,82 @@ mod tests {
         }
     }
 
+    /// 2つの点 p1 と p2 の間のユークリッド距離を計算します。
+    fn dist(p1: (f32, f32), p2: (f32, f32)) -> f32 {
+        // 1. x座標とy座標の差をそれぞれ計算します。
+        let dx = p2.0 - p1.0;
+        let dy = p2.1 - p1.1;
+
+        // 2. 三平方の定理に基づき、差の2乗の和の平方根を求めます。
+        (dx.powi(2) + dy.powi(2)).sqrt()
+    }
+
+    async fn interactive_test_main03() {
+        let mut points = vec![
+            Point { position: (200.0, 400.0), velocity: (0.0, 0.0), mass: 1.0 }, // Point A
+            Point { position: (600.0, 300.0), velocity: (0.0, 0.0), mass: 1.0 }, // Point B (Aより重い)
+            Point { position: (350.0, 150.0), velocity: (0.0, 0.0), mass: 1.0 }, // Point P
+        ];
+
+        let mut dragging_point_idx: Option<usize> = None;
+        let point_radius = 15.0;
+
+        loop {
+            // --- 1. 入力処理 (ドラッグ) ---
+            let mouse_pos = mouse_position();
+            if is_mouse_button_pressed(MouseButton::Left) {
+                for (i, p) in points.iter().enumerate() {
+                    if dist(mouse_pos, p.position) < point_radius {
+                        dragging_point_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+            if is_mouse_button_down(MouseButton::Left) {
+                if let Some(idx) = dragging_point_idx {
+                    points[idx].position = mouse_pos;
+                }
+            }
+            if is_mouse_button_released(MouseButton::Left) {
+                dragging_point_idx = None;
+            }
+
+            // --- 2. 計算 ---
+            let (final_a, final_b, final_p) = move_p_to_line_ab(&points[0], &points[1], &points[2], 20.0);
+
+            // --- 3. 描画 ---
+            clear_background(WHITE);
+
+            // Beforeの状態を描画
+            draw_line(points[0].position.0, points[0].position.1, points[1].position.0, points[1].position.1, 1.0, LIGHTGRAY);
+            draw_circle(points[0].position.0, points[0].position.1, point_radius, BLUE);
+            draw_circle(points[1].position.0, points[1].position.1, point_radius, BLUE);
+            draw_circle(points[2].position.0, points[2].position.1, point_radius, RED);
+            draw_text("A", points[0].position.0 - 5.0, points[0].position.1 + 5.0, 24.0, WHITE);
+            draw_text("B", points[1].position.0 - 5.0, points[1].position.1 + 5.0, 24.0, WHITE);
+            draw_text("P", points[2].position.0 - 5.0, points[2].position.1 + 5.0, 24.0, WHITE);
+
+            // Afterの状態を描画
+            draw_line(final_a.position.0, final_a.position.1, final_b.position.0, final_b.position.1, 2.0, BLACK);
+            draw_circle_lines(final_a.position.0, final_a.position.1, point_radius, 2.0, BLUE);
+            draw_circle_lines(final_b.position.0, final_b.position.1, point_radius, 2.0, BLUE);
+            draw_circle_lines(final_p.position.0, final_p.position.1, point_radius, 2.0, RED);
+
+            // 各点の移動ベクトルを描画
+            draw_line(points[0].position.0, points[0].position.1, final_a.position.0, final_a.position.1, 1.0, GRAY);
+            draw_line(points[1].position.0, points[1].position.1, final_b.position.0, final_b.position.1, 1.0, GRAY);
+            draw_line(points[2].position.0, points[2].position.1, final_p.position.0, final_p.position.1, 1.0, GRAY);
+            
+            // UI
+            draw_text("Drag points A, B, P to test the function.", 10.0, 20.0, 20.0, DARKGRAY);
+            draw_text("Solid: Before | Outlined: After", 10.0, 40.0, 20.0, DARKGRAY);
+            draw_text(&format!("A mass: {:.1}, B mass: {:.1}", points[0].mass, points[1].mass), 10.0, 60.0, 20.0, DARKGRAY);
+
+            next_frame().await;
+        }
+    }
+
+
     #[test] 
     fn run_interactive_visualization_test() {
         // macroquadの設定
@@ -474,9 +570,20 @@ mod tests {
             window_height: 600,
             ..Default::default()
         };
-
         // macroquadのウィンドウをテスト内で起動
         macroquad::Window::from_config(config, interactive_test_main02());
     }
 
+    #[test] 
+    fn run_interactive_visualization_test03() {
+        // macroquadの設定
+        let config = Conf {
+            window_title: "Interactive SoftBody Test".to_string(),
+            window_width: 800,
+            window_height: 600,
+            ..Default::default()
+        };
+        // macroquadのウィンドウをテスト内で起動
+        macroquad::Window::from_config(config, interactive_test_main03());
+    }
 }
