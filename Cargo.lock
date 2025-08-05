@@ -241,7 +241,6 @@ name = "softbody"
 version = "0.1.0"
 dependencies = [
  "macroquad",
- "num-traits",
 ]
 
 [[package]]
