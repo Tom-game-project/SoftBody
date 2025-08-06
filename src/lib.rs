@@ -62,6 +62,7 @@
 
 // モジュールを定義してコードを整理します。
 pub mod core {
+    use std::fmt;
     use std::ops::{Add, AddAssign, Mul, Sub, SubAssign};
 
     /// 2次元ベクトルを表す構造体。
@@ -382,6 +383,22 @@ pub mod core {
         }
     }
 
+    /// 形状生成時のエラーを定義
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ShapeError {
+        SelfIntersecting,
+        NotEnoughParticles,
+    }
+
+    impl fmt::Display for ShapeError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                ShapeError::SelfIntersecting => write!(f, "The provided shape is self-intersecting."),
+                ShapeError::NotEnoughParticles => write!(f, "Not enough particles for a closed shape (minimum 3)."),
+            }
+        }
+    }
+
     /// ソフトボディを構成する要素の集合。
     /// 実際の質点データは `Simulation` が所有し、`SoftBody` はインデックスで管理します。
     #[derive(Debug, Clone)]
@@ -389,6 +406,8 @@ pub mod core {
         pub particle_indices: Vec<usize>,
         pub springs: Vec<Spring>,
         pub shape_constraint: Option<ShapeMatchingConstraint>,
+        /// ワイヤーフレーム衝突判定用の外周ワイヤー情報 (グローバルインデックス)
+        pub outline_wires: Option<Vec<(usize, usize)>>,
     }
 
     /// シミュレーション全体の環境と状態を管理する構造体。
@@ -437,6 +456,9 @@ pub mod core {
         pub solver_iterations: usize,
         /// 境界。`Some(min, max)` で設定。`None` の場合は境界なし。
         pub bounds: Option<(Vec2, Vec2)>,
+        pub use_volumetric_collisions: bool,
+        /// ワイヤーフレーム衝突を有効にするオプション
+        pub use_wire_collisions: bool,
     }
 
     impl Default for SimulationConfig {
@@ -446,6 +468,8 @@ pub mod core {
                 damping: 0.99,
                 solver_iterations: 8,
                 bounds: None,
+                use_volumetric_collisions: false,
+                use_wire_collisions: false, // デフォルトでは無効
             }
         }
     }
@@ -518,7 +542,51 @@ pub mod core {
                 particle_indices,
                 springs,
                 shape_constraint,
+                outline_wires: None,
             });
+        }
+
+        /// 凸形状のソフトボディを追加する新しいファクトリ関数
+        pub fn add_convex_body(&mut self, particle_positions: &[Vec2], config: &SoftBodyConfig) -> Result<(), ShapeError> {
+            if particle_positions.len() < 3 { return Err(ShapeError::NotEnoughParticles); }
+
+            // 自己交差チェック
+            if geometry::check_self_intersection(particle_positions) { return Err(ShapeError::SelfIntersecting); }
+
+            let _start_index = self.particles.len();
+            let mut particle_indices = Vec::new();
+            for pos in particle_positions {
+                let mut p = Particle::new(pos.x, pos.y);
+                p.radius = config.particle_radius;
+                if config.is_fixed { p.is_fixed = true; p.inv_mass = 0.0; } else { p.inv_mass = config.particle_inv_mass; }
+                particle_indices.push(self.particles.len());
+                self.particles.push(p);
+            }
+
+            let mut outline_wires = Vec::new();
+            for i in 0..particle_indices.len() {
+                let p1_idx = particle_indices[i];
+                let p2_idx = particle_indices[(i + 1) % particle_indices.len()];
+                outline_wires.push((p1_idx, p2_idx));
+            }
+            
+            // バネは外周と、内部にもいくつか張って剛性を保つ
+            let mut springs = Vec::new();
+            for &(p1_idx, p2_idx) in &outline_wires {
+                springs.push(Spring::new(p1_idx, p2_idx, config.stiffness, &self.particles));
+            }
+            // (オプション: 内部にもバネを張るロジックを追加可能)
+
+            let shape_constraint = if config.shape_stiffness > 0.0 { Some(ShapeMatchingConstraint::new(particle_indices.clone(), config.shape_stiffness, &self.particles)) } else { None };
+
+            self.soft_bodies.push(SoftBody {
+                particle_indices,
+                springs,
+                shape_constraint,
+                outline_wires: Some(outline_wires),
+            });
+
+            Ok(())
         }
 
         /// シミュレーションを 1 ステップ進めます。
@@ -546,6 +614,7 @@ pub mod core {
                     }
                 }
                 self.solve_collisions();
+                if self.config.use_wire_collisions { self.solve_wire_collisions(); }
                 self.apply_boundary_conditions();
             }
 
@@ -585,6 +654,69 @@ pub mod core {
             }
         }
 
+        /// ワイヤーフレーム衝突解決ロジック
+        fn solve_wire_collisions(&mut self) {
+            let body_count = self.soft_bodies.len();
+            for i in 0..body_count {
+                for j in 0..body_count {
+                    if i == j { continue; } // 自分自身とは衝突しない
+
+                    // ボディj がワイヤーフレームを持つ場合のみ処理
+                    if let Some(wires_j) = self.soft_bodies[j].outline_wires.clone() {
+                        let body_j_particles: Vec<_> = self.soft_bodies[j].particle_indices.iter().map(|&idx| self.particles[idx].clone()).collect();
+                        
+                        // ボディi の各粒子がボディj にめり込んでいるかチェック
+                        for &p_idx_i in &self.soft_bodies[i].particle_indices {
+                            let p_pos_i = self.particles[p_idx_i].pos;
+
+                            if geometry::is_point_inside(p_pos_i, &body_j_particles, &self.particles) {
+                                // めり込んでいる場合、最も近いワイヤーを探す
+                                let mut min_dist_sq = f64::MAX;
+                                let mut closest_wire_indices = (0, 0);
+                                let mut closest_point_on_wire = Vec2::default();
+
+                                for &(w1_idx, w2_idx) in &wires_j {
+                                    let p1 = self.particles[w1_idx].pos;
+                                    let p2 = self.particles[w2_idx].pos;
+                                    let (dist_sq, point_on_wire) = geometry::dist_sq_to_segment(p_pos_i, p1, p2);
+                                    if dist_sq < min_dist_sq {
+                                        min_dist_sq = dist_sq;
+                                        closest_wire_indices = (w1_idx, w2_idx);
+                                        closest_point_on_wire = point_on_wire;
+                                    }
+                                }
+
+                                // 衝突応答: 位置の補正
+                                let (w1_idx, w2_idx) = closest_wire_indices;
+                                let p1_pos = self.particles[w1_idx].pos;
+                                let p2_pos = self.particles[w2_idx].pos;
+                                
+                                // ワイヤー上の最近接点の重み(t)を計算
+                                let t = if (p2_pos - p1_pos).length_squared() < f64::EPSILON { 0.5 } else {
+                                    Vec2::dot(closest_point_on_wire - p1_pos, p2_pos - p1_pos) / (p2_pos - p1_pos).length_squared()
+                                }.clamp(0.0, 1.0);
+
+                                let p_i_inv_mass = self.particles[p_idx_i].inv_mass;
+                                let w_p1_inv_mass = self.particles[w1_idx].inv_mass;
+                                let w_p2_inv_mass = self.particles[w2_idx].inv_mass;
+
+                                let total_inv_mass = p_i_inv_mass + w_p1_inv_mass * (1.0 - t) + w_p2_inv_mass * t;
+                                if total_inv_mass < f64::EPSILON { continue; }
+
+                                let penetration_vec = closest_point_on_wire - self.particles[p_idx_i].pos;
+                                let correction = penetration_vec * (1.0 / total_inv_mass);
+                                
+                                // 各粒子の位置を質量に応じて補正
+                                self.particles[p_idx_i].pos += correction * p_i_inv_mass;
+                                self.particles[w1_idx].pos -= correction * w_p1_inv_mass * (1.0 - t);
+                                self.particles[w2_idx].pos -= correction * w_p2_inv_mass * t;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         /// 境界条件を適用します。
         fn apply_boundary_conditions(&mut self) {
             if let Some((min, max)) = self.config.bounds {
@@ -615,6 +747,65 @@ pub mod core {
         /// シミュレーション設定を可変で取得します。
         pub fn config_mut(&mut self) -> &mut SimulationConfig {
             &mut self.config
+        }
+    }
+
+    /// ジオメトリ演算ヘルパーモジュール
+    mod geometry {
+        use super::{Particle, Vec2};
+
+        /// 線分ABと線分CDの交差判定 (端点での接触は交差とみなさない)
+        fn segments_intersect(p1: Vec2, p2: Vec2, p3: Vec2, p4: Vec2) -> bool {
+            let d1 = Vec2::cross(p4 - p3, p1 - p3);
+            let d2 = Vec2::cross(p4 - p3, p2 - p3);
+            let d3 = Vec2::cross(p2 - p1, p3 - p1);
+            let d4 = Vec2::cross(p2 - p1, p4 - p1);
+            ((d1 * d2) < 0.0) && ((d3 * d4) < 0.0)
+        }
+
+        /// 凸多角形の自己交差チェック
+        pub fn check_self_intersection(points: &[Vec2]) -> bool {
+            let n = points.len();
+            for i in 0..n {
+                let p1 = points[i];
+                let p2 = points[(i + 1) % n];
+                for j in (i + 2)..n {
+                    // 隣接しない辺とのみチェック
+                    if (j + 1) % n == i { continue; }
+                    let p3 = points[j];
+                    let p4 = points[(j + 1) % n];
+                    if segments_intersect(p1, p2, p3, p4) { return true; }
+                }
+            }
+            false
+        }
+
+        /// 点が凸多角形の内側にあるか判定
+        pub fn is_point_inside(point: Vec2, polygon_particles: &[Particle], _all_particles: &[Particle]) -> bool {
+            if polygon_particles.is_empty() { return false; }
+            let mut sign = 0.0;
+            for i in 0..polygon_particles.len() {
+                let p1 = polygon_particles[i].pos;
+                let p2 = polygon_particles[(i + 1) % polygon_particles.len()].pos;
+                let cross = Vec2::cross(p2 - p1, point - p1);
+                if i == 0 {
+                    sign = cross.signum();
+                } else if cross.signum() != 0.0 && cross.signum() != sign {
+                    return false; // 符号が異なれば外側
+                }
+            }
+            true // 全ての符号が同じなら内側
+        }
+        
+        /// 点と線分の距離の2乗と、線分上の最近接点を返す
+        pub fn dist_sq_to_segment(p: Vec2, a: Vec2, b: Vec2) -> (f64, Vec2) {
+            let ab = b - a;
+            let ap = p - a;
+            let len_sq = ab.length_squared();
+            if len_sq < f64::EPSILON { return ((p - a).length_squared(), a); }
+            let t = (Vec2::dot(ap, ab) / len_sq).clamp(0.0, 1.0);
+            let closest_point = a + ab * t;
+            ((p - closest_point).length_squared(), closest_point)
         }
     }
 }
