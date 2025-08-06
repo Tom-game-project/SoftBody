@@ -1,4 +1,5 @@
 use macroquad::color::{Color, GRAY, RED, WHITE};
+use macroquad::prelude::rand;
 use macroquad::input::{is_key_down, is_key_pressed, is_mouse_button_pressed, is_mouse_button_released, mouse_position, KeyCode, MouseButton};
 use macroquad::shapes::{draw_circle, draw_line};
 use macroquad::text::draw_text;
@@ -581,6 +582,212 @@ fn create_simulation(use_wire_collision: bool) -> Simulation {
     sim
 }
 
+
+// 星の色をいくつか定義
+const STAR_COLORS: [Color; 5] = [
+    Color::new(1.0, 0.8, 0.4, 1.0), // Yellow
+    Color::new(1.0, 0.5, 0.8, 1.0), // Pink
+    Color::new(0.6, 1.0, 0.8, 1.0), // Mint
+    Color::new(0.7, 0.7, 1.0, 1.0), // Lavender
+    Color::new(1.0, 0.7, 0.5, 1.0), // Peach
+];
+
+//#[macroquad::main("Falling Stars")]
+async fn test05() {
+    let mut sim = create_simulation05();
+    
+    loop {
+        // 'R'キーでリセット
+        if is_key_pressed(KeyCode::R) { 
+            sim = create_simulation05(); 
+        }
+
+        // シミュレーションを1ステップ進める
+        let dt = (get_frame_time() as f64).min(1.0 / 30.0);
+        sim.step(dt);
+
+        // 描画
+        clear_background(Color::from_rgba(30, 30, 45, 255));
+
+        // 各オブジェクトを描画
+        for (i, sb) in sim.soft_bodies().iter().enumerate() {
+            // ワイヤーフレームを持つオブジェクト（星）を描画
+            if let Some(wires) = &sb.outline_wires {
+                let color = STAR_COLORS[i % STAR_COLORS.len()];
+                for &(p1_idx, p2_idx) in wires {
+                    let p1 = &sim.particles()[p1_idx];
+                    let p2 = &sim.particles()[p2_idx];
+                    draw_line(p1.pos.x as f32, p1.pos.y as f32, p2.pos.x as f32, p2.pos.y as f32, 2.5, color);
+                }
+            }
+        }
+        
+        draw_text("Press 'R' to reset", 10.0, 20.0, 24.0, GRAY);
+        next_frame().await;
+    }
+}
+
+/// シミュレーションシーンを生成するヘルパー関数
+fn create_simulation05() -> Simulation {
+    // シミュレーションの基本設定
+    let sim_config = SimulationConfig {
+        bounds: Some((Vec2::new(0.0, 0.0), Vec2::new(screen_width() as f64, screen_height() as f64))),
+        gravity: Vec2::new(0.0, 500.0),
+        solver_iterations: 15,
+        use_wire_collisions: true, // ワイヤー衝突を有効化
+        ..Default::default()
+    };
+    let mut sim = Simulation::new(sim_config);
+
+    // 星の形状を生成するクロージャ
+    let star_points = |center: Vec2, r_outer: f64, r_inner: f64, n_points: usize| {
+        (0..n_points * 2).map(|i| {
+            let r = if i % 2 == 0 { r_outer } else { r_inner };
+            let angle = (i as f64 / (n_points * 2) as f64) * 2.0 * std::f64::consts::PI + rand::gen_range(-0.1, 0.1);
+            center + Vec2::new(angle.cos() * r, angle.sin() * r)
+        }).collect::<Vec<_>>()
+    };
+    // ぷるぷるした星を複数生成
+    let num_stars = 8;
+    for i in 0..num_stars {
+        let center_x = screen_width() as f64 * (0.2 + 0.6 * rand::gen_range(0.0, 1.0));
+        let center_y = screen_height() as f64 * (0.1 + 0.2 * rand::gen_range(0.0, 1.0)) - (i as f64 * 20.0);
+        
+        // "ぷるぷる"感を出すために剛性を低めに設定
+        let star_conf = SoftBodyConfig {
+            stiffness: 0.1,         // バネの硬さ
+            shape_stiffness: 0.2,   // 形状維持の強さ
+            is_fixed: false,
+            particle_radius: 7.0,
+            particle_inv_mass: 0.2, // 少し重め
+            ..Default::default()
+        };
+        
+        let points = star_points(Vec2::new(center_x, center_y), 60.0, 30.0, 5);
+        sim.add_convex_body(&points, &star_conf).unwrap();
+    }
+    
+    sim
+}
+
+//#[macroquad::main("Falling Stars - Gravity Fun")]
+async fn test06() {
+    let mut sim = create_simulation06();
+
+    // ★ 1. つまみUIの状態変数を定義
+    let knob_base_pos = Vec2::new(screen_width() as f64 - 100.0, screen_height() as f64 - 100.0);
+    let knob_radius = 60.0;
+    let handle_radius = 25.0;
+    let mut knob_handle_pos = knob_base_pos;
+    let mut is_dragging_knob = false;
+    let max_gravity_force = 1500.0;
+
+    loop {
+        // 'R'キーでリセット
+        if is_key_pressed(KeyCode::R) {
+            sim = create_simulation06();
+        }
+
+        // ★ 2. つまみUIの入力処理
+        let (mx, my) = mouse_position();
+        let mouse_pos = Vec2::new(mx as f64, my as f64);
+
+        if is_mouse_button_pressed(MouseButton::Left) {
+            if !is_dragging_knob && (mouse_pos - knob_base_pos).length() < knob_radius {
+                is_dragging_knob = true;
+            }
+        }
+        if is_mouse_button_released(MouseButton::Left) {
+            is_dragging_knob = false;
+        }
+
+        if is_dragging_knob {
+            let delta = mouse_pos - knob_base_pos;
+            if delta.length() > knob_radius {
+                knob_handle_pos = knob_base_pos + delta.normalize() * knob_radius;
+            } else {
+                knob_handle_pos = mouse_pos;
+            }
+        } else {
+            knob_handle_pos = knob_base_pos;
+        }
+
+        // ★ 3. UIの状態から重力を計算し、シミュレーションに適用
+        let gravity_vec = knob_handle_pos - knob_base_pos;
+        let gravity_ratio = gravity_vec.length() / knob_radius;
+        let new_gravity = gravity_vec.normalize() * max_gravity_force * gravity_ratio;
+        sim.config_mut().gravity = new_gravity;
+
+
+        // シミュレーションを1ステップ進める
+        let dt = (get_frame_time() as f64).min(1.0 / 30.0);
+        sim.step(dt);
+
+        // 描画
+        clear_background(Color::from_rgba(30, 30, 45, 255));
+
+        // 各オブジェクトを描画
+        for (i, sb) in sim.soft_bodies().iter().enumerate() {
+            if let Some(wires) = &sb.outline_wires {
+                let color = STAR_COLORS[i % STAR_COLORS.len()];
+                for &(p1_idx, p2_idx) in wires {
+                    let p1 = &sim.particles()[p1_idx];
+                    let p2 = &sim.particles()[p2_idx];
+                    draw_line(p1.pos.x as f32, p1.pos.y as f32, p2.pos.x as f32, p2.pos.y as f32, 2.5, color);
+                }
+            }
+        }
+
+        // ★ 4. つまみUIを描画
+        draw_circle(knob_base_pos.x as f32, knob_base_pos.y as f32, knob_radius as f32, Color::from_rgba(50, 50, 60, 150));
+        draw_circle(knob_handle_pos.x as f32, knob_handle_pos.y as f32, handle_radius as f32, LIGHTGRAY);
+
+        draw_text("Drag the knob to control gravity. Press 'R' to reset.", 10.0, 20.0, 20.0, GRAY);
+        next_frame().await;
+    }
+}
+
+/// シミュレーションシーンを生成するヘルパー関数
+fn create_simulation06() -> Simulation {
+    // ★ 5. 初期重力をゼロに設定
+    let sim_config = SimulationConfig {
+        bounds: Some((Vec2::new(0.0, 0.0), Vec2::new(screen_width() as f64, screen_height() as f64))),
+        gravity: Vec2::new(0.0, 0.0),
+        solver_iterations: 10,
+        use_wire_collisions: true,
+        ..Default::default()
+    };
+    let mut sim = Simulation::new(sim_config);
+
+    let star_points = |center: Vec2, r_outer: f64, r_inner: f64, n_points: usize| {
+        (0..n_points * 2).map(|i| {
+            let r = if i % 2 == 0 { r_outer } else { r_inner };
+            let angle = (i as f64 / (n_points * 2) as f64) * 2.0 * std::f64::consts::PI + rand::gen_range(-0.1, 0.1);
+            center + Vec2::new(angle.cos() * r, angle.sin() * r)
+        }).collect::<Vec<_>>()
+    };
+
+    let num_stars = 10; // 星の数を少し増やす
+    for i in 0..num_stars {
+        let center_x = screen_width() as f64 * (0.2 + 0.6 * rand::gen_range(0.0, 1.0));
+        let center_y = screen_height() as f64 * (0.2 + 0.6 * rand::gen_range(0.0, 1.0));
+
+        let star_conf = SoftBodyConfig {
+            stiffness: 0.1,
+            shape_stiffness: 0.2,
+            is_fixed: false,
+            particle_radius: 7.0,
+            particle_inv_mass: 0.2,
+            ..Default::default()
+        };
+
+        let points = star_points(Vec2::new(center_x, center_y), 60.0, 30.0, 5);
+        sim.add_convex_body(&points, &star_conf).unwrap();
+    }
+
+    sim
+}
+
 /// ```
 /// cargo test run_soft00
 /// ```
@@ -659,5 +866,37 @@ fn run_soft04() {
     };
     // macroquadのウィンドウをテスト内で起動
     macroquad::Window::from_config(config, test04());
+}
+
+/// ```
+/// cargo test run_soft05
+/// ```
+#[test]
+fn run_soft05() {
+    // macroquadの設定
+    let config = Conf {
+        window_title: "Interactive SoftBody Test".to_string(),
+        window_width: 800,
+        window_height: 600,
+        ..Default::default()
+    };
+    // macroquadのウィンドウをテスト内で起動
+    macroquad::Window::from_config(config, test05());
+}
+
+/// ```
+/// cargo test run_soft06
+/// ```
+#[test]
+fn run_soft06() {
+    // macroquadの設定
+    let config = Conf {
+        window_title: "Interactive SoftBody Test".to_string(),
+        window_width: 800,
+        window_height: 600,
+        ..Default::default()
+    };
+    // macroquadのウィンドウをテスト内で起動
+    macroquad::Window::from_config(config, test06());
 }
 
