@@ -1,5 +1,5 @@
 use macroquad::color::{Color, GRAY, RED, WHITE};
-use macroquad::input::{is_key_down, is_mouse_button_pressed, is_mouse_button_released, mouse_position, MouseButton, KeyCode};
+use macroquad::input::{is_key_down, is_key_pressed, is_mouse_button_pressed, is_mouse_button_released, mouse_position, KeyCode, MouseButton};
 use macroquad::shapes::{draw_circle, draw_line};
 use macroquad::text::draw_text;
 use macroquad::time::{get_fps, get_frame_time};
@@ -476,6 +476,73 @@ async fn test03() {
     }
 }
 
+
+async fn test04() {
+    let mut sim = create_simulation2();
+
+    loop {
+        if is_key_pressed(KeyCode::R) { sim = create_simulation2(); }
+
+        let dt = (get_frame_time() as f64).min(1.0 / 30.0);
+        sim.step(dt);
+
+        clear_background(Color::from_rgba(20, 20, 30, 255));
+
+        for sb in sim.soft_bodies() {
+            if let Some(wires) = &sb.outline_wires {
+                for &(p1_idx, p2_idx) in wires {
+                    let p1 = &sim.particles()[p1_idx]; let p2 = &sim.particles()[p2_idx];
+                    draw_line(p1.pos.x as f32, p1.pos.y as f32, p2.pos.x as f32, p2.pos.y as f32, 2.5, WHITE);
+                }
+            }
+            for &p_idx in &sb.particle_indices {
+                let p = &sim.particles()[p_idx];
+                draw_circle(p.pos.x as f32, p.pos.y as f32, p.radius as f32, VIOLET);
+            }
+        }
+
+        draw_text("Press 'R' to reset", 10.0, 20.0, 24.0, GRAY);
+        next_frame().await;
+    }
+}
+
+fn create_simulation2() -> Simulation {
+    let mut sim_config = SimulationConfig {
+        bounds: Some((Vec2::new(0.0, 0.0), Vec2::new(screen_width() as f64, screen_height() as f64))),
+        gravity: Vec2::new(0.0, 300.0),
+        solver_iterations: 12,
+        use_wire_collisions: true,
+        ..Default::default()
+    };
+    let mut sim = Simulation::new(sim_config);
+
+    let star_points = |center: Vec2, r_outer: f64, r_inner: f64, n_points: usize| {
+        (0..n_points * 2).map(|i| {
+            let r = if i % 2 == 0 { r_outer } else { r_inner };
+            let angle = (i as f64 / (n_points * 2) as f64) * 2.0 * std::f64::consts::PI;
+            center + Vec2::new(angle.cos() * r, angle.sin() * r)
+        }).collect::<Vec<_>>()
+    };
+
+    // 1. 上から落ちてくる星
+    let star1_conf = SoftBodyConfig {
+        stiffness: 0.3, shape_stiffness: 0.7, is_fixed: false, // is_fixed: false
+        particle_radius: 6.0, particle_inv_mass: 0.1, // 有限の質量
+        ..Default::default()
+    };
+    sim.add_convex_body(&star_points(Vec2::new(500.0, 150.0), 80.0, 40.0, 5), &star1_conf).unwrap();
+
+    // 2. 下で待ち受ける星
+    let star2_conf = SoftBodyConfig {
+        stiffness: 0.3, shape_stiffness: 0.7, is_fixed: false, // is_fixed: false
+        particle_radius: 6.0, particle_inv_mass: 0.1, // 有限の質量
+        ..Default::default()
+    };
+    sim.add_convex_body(&star_points(Vec2::new(500.0, 400.0), 100.0, 50.0, 7), &star2_conf).unwrap();
+
+    sim
+}
+
 // シーンを生成するヘルパー関数
 fn create_simulation(use_wire_collision: bool) -> Simulation {
     let mut sim_config = SimulationConfig {
@@ -563,7 +630,7 @@ fn run_soft02() {
 }
 
 /// ```
-/// cargo test run_soft02
+/// cargo test run_soft03
 /// ```
 #[test]
 fn run_soft03() {
@@ -576,5 +643,21 @@ fn run_soft03() {
     };
     // macroquadのウィンドウをテスト内で起動
     macroquad::Window::from_config(config, test03());
+}
+
+/// ```
+/// cargo test run_soft04
+/// ```
+#[test]
+fn run_soft04() {
+    // macroquadの設定
+    let config = Conf {
+        window_title: "Interactive SoftBody Test".to_string(),
+        window_width: 800,
+        window_height: 600,
+        ..Default::default()
+    };
+    // macroquadのウィンドウをテスト内で起動
+    macroquad::Window::from_config(config, test04());
 }
 
